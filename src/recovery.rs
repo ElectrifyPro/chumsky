@@ -2,6 +2,7 @@
 //!
 //! *“Do you find coming to terms with the mindless tedium of it all presents an interesting challenge?”*
 
+use std::marker::PhantomData;
 use super::*;
 
 /// A trait implemented by error recovery strategies.
@@ -169,6 +170,61 @@ impl<I: Clone + PartialEq, O, F: Fn(E::Span) -> O, E: Error<I>, const N: usize> 
 /// after others as a last resort, and be careful about over-using it.
 pub fn skip_until<I, F, const N: usize>(until: [I; N], fallback: F) -> SkipUntil<I, F, N> {
     SkipUntil(until, fallback, false, false)
+}
+
+/// See [`skip_until_predicate`].
+#[derive(Copy, Clone)]
+pub struct SkipUntilPredicate<F, O>(
+    pub(crate) F,
+    pub(crate) PhantomData<O>,
+);
+
+impl<I: Clone + PartialEq, O: Default, F: Fn(&I) -> bool, E: Error<I>> Strategy<I, O, E>
+    for SkipUntilPredicate<F, O>
+{
+    fn recover<D: Debugger, P: Parser<I, O, Error = E>>(
+        &self,
+        mut a_errors: Vec<Located<I, P::Error>>,
+        a_err: Located<I, P::Error>,
+        _parser: P,
+        _debugger: &mut D,
+        stream: &mut StreamOf<I, P::Error>,
+    ) -> PResult<I, O, P::Error> {
+        let pre_state = stream.save();
+        a_errors.push(a_err);
+        loop {
+            match stream.attempt(|stream| {
+                let (at, span, tok) = stream.next();
+                match tok.map(|tok| self.0(&tok)) { // chicken noodle soup
+                    Some(true) => (true, Ok(true)),
+                    Some(false) => (true, Ok(false)),
+                    None => (true, Err((at, span))),
+                }
+            }) {
+                Ok(true) => break (a_errors, Ok((O::default(), None))),
+                Ok(false) => {}
+                Err(_) if stream.save() > pre_state => {
+                    break (a_errors, Ok((O::default(), None)))
+                }
+                Err((at, span)) => {
+                    break (
+                        a_errors,
+                        Err(Located::at(
+                            at,
+                            E::expected_input_found(span, None, None),
+                            // E::expected_input_found(span, self.0.iter().cloned().map(Some), None),
+                        )),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/// A recovery mode that skips input until the given predicate returns true. Then, the default
+/// value of the output type is used to recover.
+pub fn skip_until_predicate<F, O>(predicate: F) -> SkipUntilPredicate<F, O> {
+    SkipUntilPredicate(predicate, PhantomData)
 }
 
 /// See [`nested_delimiters`].
